@@ -1,5 +1,3 @@
-# README.md
-
 # Skript: **Sitovy sken a topologie mapa**
 
 Tento bash skript automatizuje proces mapování a analýzy vaší sítě. Provádí rychlý nebo detailní aktivní sken IP adres, detekuje dostupná zařízení, zjistí jejich hostname, MAC adresy, výrobce (OUI databáze), otevřené porty a volitelně i geografickou lokaci (GeoIP).
@@ -114,11 +112,3 @@ projekt/
 
 - Tento skript byl vytvořen za účelem efektivní analýzy domácích a firemních sítí.
 - Nápady, zlepšení a reporty chyb jsou vítány!
-
----
-
-## Licence
-
-MIT License – Volné použití za podmínky přiznání autorství.
-
-
