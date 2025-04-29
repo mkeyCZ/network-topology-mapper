@@ -13,6 +13,7 @@ LOCKFILE="$OUT_DIR/.dotfile.lock"
 
 mkdir -p "$OUT_DIR"
 
+OUTFILE_RAW="$OUT_DIR/vystup_skenu_raw.txt"
 OUTFILE="$OUT_DIR/vystup_skenu.txt"
 DOTFILE="$OUT_DIR/sitova_mapa.dot"
 IMGFILE="$OUT_DIR/sitova_mapa.png"
@@ -53,24 +54,10 @@ esac
 GATEWAY=$(ip route | awk '/default/ {print $3}')
 SUBNET=$(ip -o -f inet addr show | awk '/scope global/ {print $4}' | head -n1)
 
-# Inicializace výstupů
-echo "Síťová brána: $GATEWAY" > "$OUTFILE"
-echo "Rozsah skenování: $SUBNET" >> "$OUTFILE"
-echo "" >> "$OUTFILE"
-echo "digraph sitova_mapa {" > "$DOTFILE"
-echo "  rankdir=TB;" >> "$DOTFILE"
-echo "  graph [nodesep=1.0, ranksep=1.5];" >> "$DOTFILE"
-echo "  node [shape=box, style=filled, fontname=Arial, fontsize=12, width=1.2];" >> "$DOTFILE"
-echo "  \"$GATEWAY\" [label=\"GATEWAY\\n$GATEWAY\", color=orange];" >> "$DOTFILE"
-
-# === Legenda ===
-echo "  legend [shape=none, margin=0, label=<" >> "$DOTFILE"
-echo "    <TABLE BORDER='0' CELLBORDER='1' CELLSPACING='0' CELLPADDING='4'>" >> "$DOTFILE"
-echo "      <TR><TD BGCOLOR='orange'></TD><TD>Router</TD></TR>" >> "$DOTFILE"
-echo "      <TR><TD BGCOLOR='yellow'></TD><TD>Switch</TD></TR>" >> "$DOTFILE"
-echo "      <TR><TD BGCOLOR='lightblue'></TD><TD>Ostatní zařízení</TD></TR>" >> "$DOTFILE"
-echo "      <TR><TD></TD><TD>[!RIZIKO!] označuje rizikový port</TD></TR>" >> "$DOTFILE"
-echo "    </TABLE>>];" >> "$DOTFILE"
+# === Inicializace výstupů ===
+echo "Síťová brána: $GATEWAY" > "$OUTFILE_RAW"
+echo "Rozsah skenování: $SUBNET" >> "$OUTFILE_RAW"
+echo "" >> "$OUTFILE_RAW"
 
 echo "[+] Skenuji síť $SUBNET ..."
 mapfile -t IP_LIST < <(nmap -sn "$SUBNET" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}')
@@ -93,74 +80,86 @@ sken_ip() {
   VYROBCE=$(grep -i "^$MAC_PREFIX" "$OUI_DB" | awk '{print $2, $3, $4, $5}' | head -n1)
   [[ -z "$VYROBCE" ]] && VYROBCE="Neznámý"
 
-  GEO=""
-  if [[ ! "$ip" =~ ^192\.168\.|^10\.|^172\.(1[6-9]|2[0-9]|3[01])\. ]]; then
-    if command -v geoiplookup >/dev/null; then
-      GEO=$(geoiplookup "$ip" | sed 's/GeoIP Country Edition: //')
-    fi
-  fi
-
   {
     echo "Zařízení: $ip"
-    echo "  Hostname: $HOSTNAME ($HOST_METHOD)"
+    echo "  Hostname: $HOSTNAME"
     echo "  MAC: $MAC"
     echo "  Výrobce: $VYROBCE"
-    [[ -n "$GEO" ]] && echo "  GeoIP: $GEO"
-  } >> "$OUTFILE"
+  } >> "$OUTFILE_RAW"
 
   PORT_RAW=$(nmap $SCAN_OPTS "$ip")
   PORT_OUTPUT=$(echo "$PORT_RAW" | awk '/^[0-9]+\/tcp/ && /open/ {print $1, $3}')
 
-  NODE_COLOR="lightblue"
-  if [[ "$ip" == "$GATEWAY" ]]; then
-    NODE_COLOR="orange"
-  elif [[ "$HOSTNAME" == *"router"* ]] || [[ "$VYROBCE" == *"Mikrotik"* ]] || [[ "$VYROBCE" == *"TP-Link"* ]] || [[ "$VYROBCE" == *"Asus"* ]]; then
-    NODE_COLOR="orange"
-  elif [[ "$HOSTNAME" == *"switch"* ]] || [[ "$VYROBCE" == *"Netgear"* ]] || [[ "$VYROBCE" == *"D-Link"* ]]; then
-    NODE_COLOR="yellow"
-  fi
+  while read -r line; do
+    [[ -n "$line" ]] && echo "    - ${line//// }" >> "$OUTFILE_RAW"
+  done <<< "$PORT_OUTPUT"
 
-  {
-    echo "  \"$ip\" [label=\"$HOSTNAME\\n$ip\\n$MAC\\n$VYROBCE\", color=$NODE_COLOR];"
-    echo "  \"$GATEWAY\" -> \"$ip\" [minlen=2];"
-
-    if [[ -n "$PORT_OUTPUT" ]]; then
-      echo "  \"$ip-ports\" [label=<"
-      echo "    <TABLE BORDER='0' CELLBORDER='1' CELLSPACING='0' CELLPADDING='4'>"
-      echo "      <TR><TD><B>PORTS:</B></TD></TR>"
-
-      while read -r line; do
-        if [[ -n "$line" ]]; then
-          PORT=$(echo "$line" | cut -d'/' -f1)
-          SERVICE=$(echo "$line" | awk '{print $2}')
-          FINAL_LABEL="$PORT ($SERVICE)"
-          for dp in "${DANGEROUS_PORTS[@]}"; do
-            if [[ "$PORT" == "$dp" ]]; then
-              FINAL_LABEL="[!RIZIKO!] $PORT ($SERVICE)"
-              break
-            fi
-          done
-          echo "      <TR><TD>$FINAL_LABEL</TD></TR>"
-          echo "    - $FINAL_LABEL" >> "$OUTFILE"
-        fi
-      done <<< "$PORT_OUTPUT"
-
-      echo "    </TABLE>>];"
-      echo "  \"$ip\" -> \"$ip-ports\" [style=solid, color=gray30, penwidth=2.0];"
-    fi
-  } | flock "$LOCKFILE" tee -a "$DOTFILE" > /dev/null
-
-  echo "" >> "$OUTFILE"
+  echo "" >> "$OUTFILE_RAW"
 }
 
 export -f sken_ip
-export GATEWAY OUTFILE DOTFILE OUI_DB DANGEROUS_PORTS LOCKFILE
+export OUTFILE_RAW OUI_DB DANGEROUS_PORTS
 
 CORES=$(nproc --ignore=1 2>/dev/null || echo 3)
 echo "[+] Spouštím paralelní skenování s $CORES vlákny..."
 parallel -j "$CORES" sken_ip ::: "${IP_LIST[@]}"
 
+# === Označení rizikových portů ===
+cp "$OUTFILE_RAW" "$OUTFILE"
+for port in "${DANGEROUS_PORTS[@]}"; do
+  sed -i "s/^    - $port /    - [!RIZIKO!] $port /" "$OUTFILE"
+done
+
+# === Generování .dot souboru ===
+echo "digraph sitova_mapa {" > "$DOTFILE"
+echo "  rankdir=TB;" >> "$DOTFILE"
+echo "  graph [nodesep=1.0, ranksep=1.5];" >> "$DOTFILE"
+echo "  node [shape=box, style=filled, fontname=Arial, fontsize=12, width=1.2];" >> "$DOTFILE"
+echo "  \"$GATEWAY\" [label=\"GATEWAY\\n$GATEWAY\", color=orange];" >> "$DOTFILE"
+
+echo "  legend [shape=none, margin=0, label=<" >> "$DOTFILE"
+echo "    <TABLE BORDER='0' CELLBORDER='1' CELLSPACING='0' CELLPADDING='4'>" >> "$DOTFILE"
+echo "      <TR><TD BGCOLOR='orange'></TD><TD>Router</TD></TR>" >> "$DOTFILE"
+echo "      <TR><TD BGCOLOR='yellow'></TD><TD>Switch</TD></TR>" >> "$DOTFILE"
+echo "      <TR><TD BGCOLOR='lightblue'></TD><TD>Ostatní zařízení</TD></TR>" >> "$DOTFILE"
+echo "    </TABLE>>];" >> "$DOTFILE"
+
+current_ip=""
+current_hostname=""
+current_mac=""
+current_vyrobce=""
+declare -a current_ports=()
+
+while read -r line; do
+  if [[ "$line" =~ ^Zařízení:\ (.+)$ ]]; then
+    if [[ -n "$current_ip" ]]; then
+      echo "  \"$current_ip-ports\" [label=<" >> "$DOTFILE"
+      echo "    <TABLE BORDER='0' CELLBORDER='1' CELLSPACING='0' CELLPADDING='4'>" >> "$DOTFILE"
+      echo "      <TR><TD><B>PORTY:</B></TD></TR>" >> "$DOTFILE"
+      for p in "${current_ports[@]}"; do
+        echo "      <TR><TD>$p</TD></TR>" >> "$DOTFILE"
+      done
+      echo "    </TABLE>>];" >> "$DOTFILE"
+      echo "  \"$current_ip\" -> \"$current_ip-ports\" [style=solid, color=gray30, penwidth=2.0];" >> "$DOTFILE"
+    fi
+    current_ip="${BASH_REMATCH[1]}"
+    current_ports=()
+  elif [[ "$line" =~ ^\ {2}Hostname:\ (.+)$ ]]; then
+    current_hostname="${BASH_REMATCH[1]}"
+  elif [[ "$line" =~ ^\ {2}MAC:\ (.+)$ ]]; then
+    current_mac="${BASH_REMATCH[1]}"
+  elif [[ "$line" =~ ^\ {2}Výrobce:\ (.+)$ ]]; then
+    current_vyrobce="${BASH_REMATCH[1]}"
+    label="$current_hostname\\n$current_ip\\n$current_mac\\n$current_vyrobce"
+    echo "  \"$current_ip\" [label=\"$label\", color=lightblue];" >> "$DOTFILE"
+    echo "  \"$GATEWAY\" -> \"$current_ip\" [minlen=2];" >> "$DOTFILE"
+  elif [[ "$line" =~ ^\ {4}-\ (.+)$ ]]; then
+    current_ports+=("${BASH_REMATCH[1]}")
+  fi
+done < "$OUTFILE"
+
 echo "}" >> "$DOTFILE"
+
 dot -Tpng "$DOTFILE" -o "$IMGFILE"
 dot -Tpdf "$DOTFILE" -o "$PDFFILE"
 
@@ -172,4 +171,3 @@ echo "Výstupy:"
 echo " - Textový výstup: $OUTFILE"
 echo " - PNG mapa:       $IMGFILE"
 echo " - PDF mapa:       $PDFFILE"
-
