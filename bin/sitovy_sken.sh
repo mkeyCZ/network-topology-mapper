@@ -68,10 +68,9 @@ sken_ip() {
   ip="$1"
 
   HOSTNAME=$(dig -x "$ip" +short | sed 's/\.$//')
-  HOST_METHOD="DNS"
-  [[ -z "$HOSTNAME" ]] && HOSTNAME=$(avahi-resolve-address "$ip" 2>/dev/null | awk '{print $2}') && HOST_METHOD="mDNS"
-  [[ -z "$HOSTNAME" ]] && HOSTNAME=$(nmblookup -A "$ip" 2>/dev/null | grep '<00>' | head -n1 | awk '{print $1}') && HOST_METHOD="NetBIOS"
-  [[ -z "$HOSTNAME" ]] && HOSTNAME="(bez jména)" && HOST_METHOD="n/d"
+  [[ -z "$HOSTNAME" ]] && HOSTNAME=$(avahi-resolve-address "$ip" 2>/dev/null | awk '{print $2}')
+  [[ -z "$HOSTNAME" ]] && HOSTNAME=$(nmblookup -A "$ip" 2>/dev/null | grep '<00>' | head -n1 | awk '{print $1}')
+  [[ -z "$HOSTNAME" ]] && HOSTNAME="(bez jména)"
 
   MAC=$(ip neigh | grep "$ip" | awk '{print $5}' | head -n1 | tr '[:upper:]' '[:lower:]')
   [[ "$MAC" == "FAILED" || -z "$MAC" ]] && MAC="neznámá"
@@ -115,48 +114,80 @@ echo "digraph sitova_mapa {" > "$DOTFILE"
 echo "  rankdir=TB;" >> "$DOTFILE"
 echo "  graph [nodesep=1.0, ranksep=1.5];" >> "$DOTFILE"
 echo "  node [shape=box, style=filled, fontname=Arial, fontsize=12, width=1.2];" >> "$DOTFILE"
-echo "  \"$GATEWAY\" [label=\"GATEWAY\\n$GATEWAY\", color=orange];" >> "$DOTFILE"
 
+# >>> LEGENDA:
 echo "  legend [shape=none, margin=0, label=<" >> "$DOTFILE"
 echo "    <TABLE BORDER='0' CELLBORDER='1' CELLSPACING='0' CELLPADDING='4'>" >> "$DOTFILE"
 echo "      <TR><TD BGCOLOR='orange'></TD><TD>Router</TD></TR>" >> "$DOTFILE"
 echo "      <TR><TD BGCOLOR='yellow'></TD><TD>Switch</TD></TR>" >> "$DOTFILE"
 echo "      <TR><TD BGCOLOR='lightblue'></TD><TD>Ostatní zařízení</TD></TR>" >> "$DOTFILE"
+echo "      <TR><TD BGCOLOR='red'><B>RIZIKO</B></TD><TD>Otevřený rizikový port</TD></TR>" >> "$DOTFILE"
 echo "    </TABLE>>];" >> "$DOTFILE"
 
+# === Zpracování výstupu ===
+declare -A DEVICE_INFO
 current_ip=""
-current_hostname=""
-current_mac=""
-current_vyrobce=""
 declare -a current_ports=()
 
 while read -r line; do
   if [[ "$line" =~ ^Zařízení:\ (.+)$ ]]; then
-    if [[ -n "$current_ip" ]]; then
-      echo "  \"$current_ip-ports\" [label=<" >> "$DOTFILE"
-      echo "    <TABLE BORDER='0' CELLBORDER='1' CELLSPACING='0' CELLPADDING='4'>" >> "$DOTFILE"
-      echo "      <TR><TD><B>PORTY:</B></TD></TR>" >> "$DOTFILE"
-      for p in "${current_ports[@]}"; do
-        echo "      <TR><TD>$p</TD></TR>" >> "$DOTFILE"
-      done
-      echo "    </TABLE>>];" >> "$DOTFILE"
-      echo "  \"$current_ip\" -> \"$current_ip-ports\" [style=solid, color=gray30, penwidth=2.0];" >> "$DOTFILE"
-    fi
     current_ip="${BASH_REMATCH[1]}"
     current_ports=()
   elif [[ "$line" =~ ^\ {2}Hostname:\ (.+)$ ]]; then
-    current_hostname="${BASH_REMATCH[1]}"
+    DEVICE_INFO["$current_ip,hostname"]="${BASH_REMATCH[1]}"
   elif [[ "$line" =~ ^\ {2}MAC:\ (.+)$ ]]; then
-    current_mac="${BASH_REMATCH[1]}"
+    DEVICE_INFO["$current_ip,mac"]="${BASH_REMATCH[1]}"
   elif [[ "$line" =~ ^\ {2}Výrobce:\ (.+)$ ]]; then
-    current_vyrobce="${BASH_REMATCH[1]}"
-    label="$current_hostname\\n$current_ip\\n$current_mac\\n$current_vyrobce"
-    echo "  \"$current_ip\" [label=\"$label\", color=lightblue];" >> "$DOTFILE"
-    echo "  \"$GATEWAY\" -> \"$current_ip\" [minlen=2];" >> "$DOTFILE"
+    DEVICE_INFO["$current_ip,vyrobce"]="${BASH_REMATCH[1]}"
   elif [[ "$line" =~ ^\ {4}-\ (.+)$ ]]; then
     current_ports+=("${BASH_REMATCH[1]}")
+  elif [[ -z "$line" && -n "$current_ip" ]]; then
+    DEVICE_INFO["$current_ip,ports"]="${current_ports[*]}"
+    current_ip=""
   fi
 done < "$OUTFILE"
+
+# === Vykreslení uzlů ===
+for ip in "${!DEVICE_INFO[@]}"; do
+  this_ip="${ip%%,*}"
+  if [[ "$ip" == "$this_ip,hostname" ]]; then
+    hostname="${DEVICE_INFO["$this_ip,hostname"]}"
+    mac="${DEVICE_INFO["$this_ip,mac"]}"
+    vyrobce="${DEVICE_INFO["$this_ip,vyrobce"]}"
+    ports="${DEVICE_INFO["$this_ip,ports"]:-}"
+
+    label="$hostname\\n$this_ip\\n$mac\\n$vyrobce"
+
+    if [[ "$this_ip" == "$GATEWAY" ]]; then
+      color="orange"
+    elif [[ "$vyrobce" =~ (Cisco|MikroTik|Ubiquiti|[Tt][Pp][-]?[Ll][Ii][Nn][Kk]|D-Link|Netgear|Aruba|Juniper) ]]; then
+      color="yellow"
+    else
+      color="lightblue"
+    fi
+
+    echo "  \"$this_ip\" [label=\"$label\", color=$color];" >> "$DOTFILE"
+
+    if [[ "$this_ip" != "$GATEWAY" ]]; then
+      echo "  \"$GATEWAY\" -> \"$this_ip\" [minlen=2];" >> "$DOTFILE"
+    fi
+
+    if [[ -n "$ports" ]]; then
+      echo "  \"$this_ip-ports\" [label=<" >> "$DOTFILE"
+      echo "    <TABLE BORDER='0' CELLBORDER='1' CELLSPACING='0' CELLPADDING='4'>" >> "$DOTFILE"
+      echo "      <TR><TD><B>PORTY:</B></TD></TR>" >> "$DOTFILE"
+      for port in $ports; do
+        if [[ "$port" == *"[!RIZIKO!]"* ]]; then
+          echo "      <TR><TD BGCOLOR='red'>$port</TD></TR>" >> "$DOTFILE"
+        else
+          echo "      <TR><TD>$port</TD></TR>" >> "$DOTFILE"
+        fi
+      done
+      echo "    </TABLE>>];" >> "$DOTFILE"
+      echo "  \"$this_ip\" -> \"$this_ip-ports\" [style=solid, color=gray30, penwidth=2.0];" >> "$DOTFILE"
+    fi
+  fi
+done
 
 echo "}" >> "$DOTFILE"
 
@@ -171,3 +202,4 @@ echo "Výstupy:"
 echo " - Textový výstup: $OUTFILE"
 echo " - PNG mapa:       $IMGFILE"
 echo " - PDF mapa:       $PDFFILE"
+
