@@ -4,6 +4,12 @@ Tento bash skript slouží k automatizované analýze a vizualizaci vaší loká
 
 ---
 
+## 🖼️ Ukázka výstupu
+
+![Ukázka síťové mapy](https://raw.githubusercontent.com/mkeyCZ/network-topology-mapper/main/screenshot/sitova_mapa_.png)
+
+---
+
 ## ✅ Hlavní funkce
 
 - Aktivní sken sítě pomocí `nmap` (`ping scan`, zjištění služeb a OS)
